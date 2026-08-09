@@ -1,0 +1,233 @@
+/* hechima 縦書き（スパイク）— プレーンテキスト専用の縦書き編集ビュー。
+   配色は Obsidian の CSS 変数だけで組む（テーマを切り替えると一緒に着替える）。 */
+
+.tategaki-view {
+    padding: 0;
+    overflow: hidden;
+}
+
+/* 自前キャレット（.tategaki-caret）の座標基準。position: relative が要る */
+.tategaki-wrap {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+.tategaki-editor {
+    /* 縦組。行は箱の**右端**から始まり、列は左へ増える */
+    writing-mode: vertical-rl;
+    /* 行長の指定（height）に padding を足して計算できるよう、箱の数え方を固定する */
+    box-sizing: border-box;
+    --tategaki-pad-y: 1.5rem;
+    max-height: 100%;
+    /* 高さ = 行長。flex で「ペインの高さ − ステータス行」に決まる */
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    /* 列が増えた分は横スクロール。縦は出さない（縦に溢れる = 行長の設定ミス） */
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: var(--tategaki-pad-y) 1.25rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    outline: none;
+    /* マウスカーソルは**自前の画像**で置く。縦組では I ビームを 90° 倒した「横 I ビーム」が
+       正しい形だが、その要求（vertical-text）を持っていないカーソルテーマだと X11 の
+       既定＝大きな「×」に落ちる（ChromeOS の Crostini で実測 2026-08-08）。
+       SVG を data URI で持てばテーマに依存しない。末尾の text は最後の保険 */
+    cursor:
+        url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><g fill="none" stroke="white" stroke-width="4" stroke-linecap="round"><path d="M5 12h14M5 8.5v7M19 8.5v7"/></g><g fill="none" stroke="black" stroke-width="1.6" stroke-linecap="round"><path d="M5 12h14M5 8.5v7M19 8.5v7"/></g></svg>') 12 12,
+        text;
+    font-family: var(--font-text, inherit);
+    font-size: var(--font-text-size, 16px);
+    /* 縦組では line-height が**列の間隔**になる。詰まって見えるので横書きより広めに */
+    line-height: 1.9;
+    color: var(--text-normal);
+    /* native キャレットは Safari が縦書きで誤描画する（形が短い・改行のたびに下へ
+       累積ドリフト）ので隠し、.tategaki-caret を実測位置に自前で描く */
+    caret-color: transparent;
+}
+
+/* システム IME の変換中だけは native キャレットを戻す。
+   未確定表示はブラウザが描くので、そこに自前キャレットを重ねても混乱するだけ
+   （hechima を繋いだらこの分岐は不要になる） */
+.tategaki-editor.is-composing {
+    caret-color: var(--text-normal);
+}
+
+/* 縦書き用の横棒キャレット。位置は main.js の updateCaret がプローブ実測で置く */
+.tategaki-caret {
+    position: absolute;
+    z-index: 5;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--interactive-accent, var(--text-accent));
+    pointer-events: none;
+    animation: tategaki-blink 1.06s steps(2, start) infinite;
+}
+
+@keyframes tategaki-blink {
+    to { visibility: hidden; }
+}
+
+/* ★**画面の最下部に貼る。** 行長を固定するとエディタが縦に縮むので、
+   margin-top: auto が無いと本文の直下（画面の途中）に浮いてしまう */
+.tategaki-status {
+    flex: none;
+    margin-top: auto;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.25rem 1rem;
+    border-top: 1px solid var(--background-modifier-border);
+    color: var(--text-faint);
+    font-family: var(--font-interface, sans-serif);
+    font-size: 0.75rem;
+}
+
+/* 入力モードは右下隅（打っている手からいちばん近い隅） */
+.tategaki-status-mode {
+    flex: none;
+    white-space: nowrap;
+}
+
+/* 行長が画面に入りきらないときの注意書き */
+.tategaki-status-count .is-warn {
+    color: var(--text-warning, var(--text-accent));
+}
+
+/* 区切りは中黒ではなく空き。記号を挟むより静かに読める */
+.tategaki-status-count {
+    display: flex;
+    gap: 1.25em;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ */
+/* hechima 接続時の未確定表示と候補窓                                  */
+/* ------------------------------------------------------------------ */
+
+/* 未確定は本文と同じ流れの中に置く（= CSS が本文ごと縦に組む）。
+   span 自体には何も足さない —— 下線は文節の span だけが描く */
+.tategaki-comp {
+    white-space: pre-wrap;
+}
+
+/* ★縦組の傍線は**右**に出す。横書きの下線をそのまま倒すと左に来て、
+   縦書きの作法から外れる。
+   vertical-rl では物理右 = 段が進む方向の逆 = 伝統的な傍線の側 */
+.tategaki-seg-yomi {
+    border-right: 2px dashed var(--text-muted);
+}
+
+.tategaki-seg-focus {
+    background: var(--text-selection);
+    border-right: 2px solid var(--interactive-accent);
+}
+
+.tategaki-seg-other {
+    border-right: 1px solid var(--text-faint);
+}
+
+/* 候補窓。**段組は「横 flex の各段に writing-mode」**方式で、
+   コンテナ自体は横書きのままにする（直交フローの自動サイズ計算を避ける） */
+.tategaki-cands {
+    position: absolute;
+    z-index: 10;
+    /* 外側は縦に 2 段（段の並び / ページ位置）。フッタは候補窓の**下**に来る */
+    display: flex;
+    flex-direction: column;
+    max-width: 100%;
+    max-height: calc(100% - 2rem);
+    padding: 4px;
+    background: var(--background-primary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s, 4px);
+    box-shadow: var(--shadow-s, 0 2px 8px rgba(0, 0, 0, .15));
+    color: var(--text-normal);
+    font-size: var(--font-text-size, 16px);
+}
+
+.tategaki-cand-cols {
+    display: flex;
+    align-items: flex-start;
+    gap: 2px;
+    min-height: 0;
+}
+
+/* 左に出したときは段を右→左に並べる（第一候補が注目文節の隣に来る）。
+   右へフリップしたときは既定の左→右のまま = やはり第一候補が隣。
+   **矢印キーの候補送りもこの流れに追従する**（main.js の arrowToLogical） */
+.tategaki-cand-cols.is-rl {
+    flex-direction: row-reverse;
+}
+
+.tategaki-cand {
+    writing-mode: vertical-rl;
+    display: flex;
+    align-items: center;
+    gap: .5em;
+    padding: 4px 2px;
+    border-radius: 3px;
+    white-space: nowrap;
+    max-height: 100%;
+    overflow: hidden;
+    cursor: pointer;
+}
+
+.tategaki-cand.is-sel {
+    background: var(--interactive-accent);
+    color: var(--text-on-accent);
+}
+
+/* 番号は 1 マスに立てる（縦中横）。倒れた数字は読みづらい */
+.tategaki-cand-num {
+    text-combine-upright: all;
+    font-family: var(--font-interface, sans-serif);
+    font-size: .75rem;
+    color: var(--text-faint);
+}
+
+.tategaki-cand.is-sel .tategaki-cand-num {
+    color: var(--text-on-accent);
+    opacity: .7;
+}
+
+.tategaki-cand.is-additional .tategaki-cand-num {
+    text-combine-upright: none;
+    font-size: .7rem;
+}
+
+/* ページ位置。**候補との間に区切り線**を挟んで、窓の下に横書きのまま置く */
+.tategaki-cand-foot {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--background-modifier-border);
+    color: var(--text-faint);
+    font-family: var(--font-interface, sans-serif);
+    font-size: .7rem;
+    min-height: 1em;
+}
+
+/* モード切替は右下の枠を一瞬光らせる（文字はいつも出ているので置き換えは要らない） */
+.tategaki-status-mode.is-flash {
+    color: var(--text-accent);
+    font-weight: 600;
+}
+
+/* 追加候補と通常候補の区切り（縦組なので縦の細い線になる） */
+.tategaki-cand-divider {
+    flex: none;
+    align-self: stretch;
+    width: 1px;
+    margin: 2px 2px;
+    background: var(--background-modifier-border);
+}
