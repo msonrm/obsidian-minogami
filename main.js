@@ -162,6 +162,7 @@ class TategakiView extends TextFileView {
         this.scrollHoldUntil = 0;
         this.scrollHoldRaf = 0;
         this.editHoldClamp = false; // 1 打鍵ぶんの編集中（動いてよい量に上限を掛ける）
+        this.caretInView = true;    // キャレットが枠の中に見えているか（描画と編集の両方で使う）
         this.lastCaretOffset = 0;
         this.goalOffsetY = null; // 行移動で保つ「行に沿った目標位置」（枠の上端からの距離）
         this.caretSide = "upstream"; // 折り返し境界でキャレットをどちらの行に描くか
@@ -736,6 +737,15 @@ class TategakiView extends TextFileView {
         }
         this.caretRetry = 0;
         const box = this.editorEl.getBoundingClientRect();
+        // ★**枠の外に出たキャレットは消す。** 端に貼り付けて描くと、指でスクロールした
+        // あとに「宙ぶらりんのキャレット」が残る（実機 2026-08-10）。
+        // ここで持つ `caretInView` は**編集のときにも使う** —— 見えていない場所で打ったら、
+        // その場所まで戻すのが正しい（下の armEditScroll）
+        this.caretInView = rect.right > box.left + 1 && rect.left < box.right - 1;
+        if (!this.caretInView) {
+            this.caretEl.style.display = "none";
+            return;
+        }
         const fs = parseFloat(getComputedStyle(this.editorEl).fontSize) || 18;
         const w = Math.min(rect.width || fs, fs);
         const left = Math.min(
@@ -837,7 +847,11 @@ class TategakiView extends TextFileView {
      */
     armEditScroll() {
         this.holdScroll();
-        this.editHoldClamp = true;
+        // ★上限を掛けるのは**キャレットが見えているときだけ**。
+        // 指でスクロールして見えなくなった状態で打ったら、**打った場所まで戻す**のが正しい
+        // （上限を無条件に掛けていて、「宙ぶらりんのまま入力しても画面が動かない」
+        // という形で出た / 実機 2026-08-10）
+        this.editHoldClamp = this.caretInView;
     }
 
     scrollToRect(rect) {
