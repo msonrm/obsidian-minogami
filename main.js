@@ -135,6 +135,7 @@ class TategakiView extends TextFileView {
         this.hostObj = null;
         this.flashTimer = null;
         this.lineLengthShort = 0; // 行長が画面に入りきらなかったときの実際の字数
+        this.statusTimer = null;
         this.pinCaretX = null;   // 行移動で狙う画面上の横位置
         this.pinFrames = 0;
         this.caretRetry = 0;
@@ -176,6 +177,17 @@ class TategakiView extends TextFileView {
 
     setViewData(data, clear) {
         this.data = data ?? "";
+        try {
+            this.renderDoc(clear);
+        } catch (e) {
+            // ★**本文の読み込みが、飾りの処理で失敗してはいけない。**
+            // ここで投げると Obsidian は「ファイルを開くのに失敗しました」を出し、
+            // タブが空になる。原因はコンソールに出す
+            console.error("minogami: 表示の組み立てに失敗", e);
+        }
+    }
+
+    renderDoc(clear) {
         this.ensureDom();
         const keep = clear ? 0 : Math.min(this.lastCaretOffset, this.data.length);
         // 1 本のテキストノードとして流し込む（white-space: pre-wrap が改行を保つ）。
@@ -215,6 +227,8 @@ class TategakiView extends TextFileView {
         this.compEl = null;
         if (this.flashTimer) clearTimeout(this.flashTimer);
         this.flashTimer = null;
+        if (this.statusTimer) clearTimeout(this.statusTimer);
+        this.statusTimer = null;
         if (this.caretRaf) cancelAnimationFrame(this.caretRaf);
         this.caretRaf = 0;
         if (this.scrollGuardRaf) cancelAnimationFrame(this.scrollGuardRaf);
@@ -541,13 +555,13 @@ class TategakiView extends TextFileView {
         const near = (r) => !!r && Math.abs((r.left + r.right) / 2 - x) <= tol;
         const up = this.sideRect(off, "upstream");
         const dn = this.sideRect(off, "downstream");
-        if (near(up)) return "upstream";
-        if (near(dn)) return "downstream";
-        if (up || dn) return null; // 測れたうえで両方とも別の列 = 本当に外している
+        if (near(up)) return { side: "upstream", verified: true };
+        if (near(dn)) return { side: "downstream", verified: true };
+        if (up || dn) return { side: null, verified: true }; // 測れたうえで別の列 = 外している
         // 掴む文字がまったく無い場所（文末の空行など）。ここでプローブを走らせると
         // 長い文書で固まるので、**着地を信じる**。caretRangeFromPoint が返した点なので、
         // そもそも狙った座標にある
-        return this.caretSide;
+        return { side: this.caretSide, verified: false };
     }
 
     /**
@@ -607,7 +621,7 @@ class TategakiView extends TextFileView {
             this.caretRaf = 0;
             const wantScroll = this.pendingScroll;
             this.pendingScroll = false;
-            this.updateStatus();
+            this.scheduleStatus();
             this.updateCaret(wantScroll);
         });
     }
@@ -707,11 +721,11 @@ class TategakiView extends TextFileView {
         if (text === this.data) return;
         this.data = text;
         this.requestSave();
-        this.updateStatus();
+        this.scheduleStatus();
     }
 
     snapshot() {
-        this.undoStack.push({ text: this.docText(), caret: this.caretOffset() });
+        this.undoStack.push({ text: this.data ?? this.docText(), caret: this.caretOffset() });
         if (this.undoStack.length > UNDO_MAX) this.undoStack.shift();
         this.redoStack = [];
     }
@@ -744,16 +758,38 @@ class TategakiView extends TextFileView {
     insertTextAtCaret(text) {
         const r = this.caretRange();
         r.deleteContents();
+        // ★**ノードを分割しない。** 既存のテキストノードへ直接差し込む。
+        // insertNode + normalize は 6 万字のテキストノードを作り直し、縦組を
+        // 丸ごと組み直すので、1 打鍵に 1 秒近くかかっていた（実機 2026-08-09）
+        const node = r.startContainer;
+        if (node.nodeType === 3) {
+            node.insertData(r.startOffset, text);
+            const after = document.createRange();
+            after.setStart(node, r.startOffset + text.length);
+            after.collapse(true);
+            this.selectRange(after);
+            this.lastCaretOffset = this.caretOffset();
+            return;
+        }
         const tn = document.createTextNode(text);
         r.insertNode(tn);
         const after = document.createRange();
-        after.setStartAfter(tn);
+        after.setStart(tn, text.length);
         after.collapse(true);
         this.selectRange(after);
+        this.lastCaretOffset = this.caretOffset();
+    }
+
+    /** 範囲を消す。1 つのテキストノードに収まるなら**その場で削る**（組み直しを避ける） */
+    deleteRange(r, caretAt) {
+        if (r.startContainer === r.endContainer && r.startContainer.nodeType === 3) {
+            r.startContainer.deleteData(r.startOffset, r.endOffset - r.startOffset);
+            this.setCaretByOffset(caretAt);
+            return;
+        }
+        r.deleteContents();
         this.editorEl.normalize();
-        // normalize 後に要素境界へアンカーされたキャレットは縦書きで描画位置がずれる
-        // （改行のたびに下へ累積ドリフト）ので、テキストノード内オフセットへ張り直す
-        this.setCaretByOffset(this.caretOffset());
+        this.setCaretByOffset(caretAt);
     }
 
     deleteAround(back) {
@@ -774,18 +810,14 @@ class TategakiView extends TextFileView {
             const n = /[\uDC00-\uDFFF]$/.test(prev) && prev.length >= 2 ? 2 : 1;
             const r = this.rangeAt(off - n, off);
             if (!r) return;
-            r.deleteContents();
-            this.editorEl.normalize();
-            this.setCaretByOffset(off - n);
+            this.deleteRange(r, off - n);
         } else {
             if (off >= text.length) return;
             const next = text.slice(off);
             const n = /^[\uD800-\uDBFF]/.test(next) && next.length >= 2 ? 2 : 1;
             const r = this.rangeAt(off, off + n);
             if (!r) return;
-            r.deleteContents();
-            this.editorEl.normalize();
-            this.setCaretByOffset(off);
+            this.deleteRange(r, off);
         }
     }
 
@@ -861,10 +893,17 @@ class TategakiView extends TextFileView {
         // ★**進める距離にも上限がある。** 1 列ぶんの移動で動く字数は、長くても
         // 「いまの行の残り + 次の行の目標位置」= 行長の 2 倍まで。向きだけを見ていると、
         // 空行に着地して列の照合が効かないときに**遠くへ飛んだものが通ってしまう**
-        const limit = (this.charsPerLine() * 2 + 8) * Math.max(1, n);
+        // 行長は**全角での字数**。半角ばかりの行は倍近く入るので、
+        // 「いまの行の残り + 次の行の目標位置」は行長の 4 倍まで見込む
+        // （狭くすると、半角の多い行で正しい移動まで差し戻される / 実機 2026-08-09）
+        const limit = (this.charsPerLine() * 4 + 16) * Math.max(1, n);
         const tooFar = Math.abs(after - before) > limit;
-        const side = this.landedIn(x, step * 0.75);
-        if (alter !== "extend" && (!side || wrongWay || tooFar)) {
+        // ★距離の上限は**列の照合ができなかったときだけ**効かせる。
+        // 照合が通っているなら狙った列に居るのは確かで、そこへ何字進んだかは
+        // 行の中身（半角の割合）次第。両方に効かせると、半角の多い行で
+        // 正しい移動まで差し戻された（実機 2026-08-09）
+        const { side, verified } = this.landedIn(x, step * 0.75);
+        if (alter !== "extend" && (!side || wrongWay || (!verified && tooFar))) {
             this.setCaretByOffset(before);
             this.goalOffsetY = null;
             return;
@@ -1006,7 +1045,7 @@ class TategakiView extends TextFileView {
         this.lastCaretOffset = this.caretOffset();
         // ★着地した側に描画を合わせる。ここを忘れると、折り返しの行頭に着いたのに
         // 前の行の末尾に描かれる（「ページ移動すると行末に出る」の正体）
-        const side = this.landedIn(x, this.columnStep() * 0.75);
+        const { side } = this.landedIn(x, this.columnStep() * 0.75);
         if (side) this.caretSide = side;
     }
 
@@ -1049,7 +1088,7 @@ class TategakiView extends TextFileView {
      * 利用者が自分でスクロールしたときに引き戻すことはない。
      */
     reassertScroll() {
-        this.scrollGuardUntil = performance.now() + 300;
+        this.scrollGuardUntil = performance.now() + 150;
         if (this.scrollGuardRaf) return;
         const tick = () => {
             this.scrollGuardRaf = 0;
@@ -1497,7 +1536,6 @@ class TategakiView extends TextFileView {
         // native が処理した入力の後始末（スナップショットは beforeinput で積んである）
         this.syncFromDom();
         this.scheduleCaret(true);
-        this.reassertScroll(); // Safari の「遅れてくる飛び」対策
     }
 
     /**
@@ -1505,6 +1543,20 @@ class TategakiView extends TextFileView {
      * ★以前は「字数」が改行を除いた数、「現在位置」が改行を含むオフセットで、
      * **単位が違うのに並べていた**（3,393 字の文書で「3,506 字目」になる）。
      */
+    /**
+     * ステータス行の更新を間引く。**集計は本文全体を数え直す**（段落ごとの行数）ので、
+     * 打鍵のたびに走らせると 6 万字では効いてくる。キャッシュは本文をキーにしていて
+     * **打鍵のたびに外れる**ため、頻度そのものを落とすのが正しい。
+     * 数の表示は 0.2 秒遅れても困らない。
+     */
+    scheduleStatus() {
+        if (this.statusTimer) return;
+        this.statusTimer = setTimeout(() => {
+            this.statusTimer = null;
+            this.updateStatus();
+        }, 200);
+    }
+
     updateStatus() {
         if (!this.countEl) return;
         const text = this.data ?? "";
@@ -1512,11 +1564,11 @@ class TategakiView extends TextFileView {
             ? this.caretOffset()
             : Math.min(this.lastCaretOffset, text.length);
         const head = text.slice(0, off);
-        const chars = countChars(text);
         // ★行数は**いま画面で 1 行に入る字数**で数える（設定値、自動なら実測）。
         // 20 字固定だと、行長を変えたとき見えている行数と食い違う。
         // 枚数だけは 400 字詰め換算（20 字 × 20 行）という別の単位で、混ぜない
         const perLine = this.charsPerLine();
+        const chars = countChars(text);
         const lines = countLines(text, perLine);
         const sheets = chars
             ? (countLines(text, GENKO_CHARS_PER_LINE) / GENKO_LINES_PER_SHEET).toFixed(1)
@@ -1609,18 +1661,28 @@ module.exports = class TategakiPlugin extends Plugin {
      * ファイルの実体は Markdown のまま。プレビューを増やすわけではない。
      */
     async toggle() {
-        const leaf = this.app.workspace.getMostRecentLeaf();
-        if (!leaf) return;
-        const file = leaf.view?.file ?? this.app.workspace.getActiveFile();
-        if (!file) {
+        // ★**ファイルはワークスペースに訊く。** リーフの view から取ると、
+        // 復元に失敗した空のタブ（種別を改名した後などに残る）を掴んだときに
+        // パスが空のまま切り替えようとして「ファイル "" を開くのに失敗しました」になる
+        const file = this.app.workspace.getActiveFile();
+        if (!file?.path) {
             new Notice("縦書き: ファイルが開かれていない");
             return;
         }
-        const isTategaki = leaf.getViewState().type === VIEW_TYPE;
-        await leaf.setViewState({
-            type: isTategaki ? "markdown" : VIEW_TYPE,
-            active: true,
-            state: isTategaki ? { file: file.path, mode: "source" } : { file: file.path },
-        });
+        const leaf = this.app.workspace.getMostRecentLeaf() ?? this.app.workspace.getLeaf(false);
+        const toMarkdown = leaf?.getViewState?.()?.type === VIEW_TYPE;
+        const state = toMarkdown
+            ? { type: "markdown", active: true, state: { file: file.path, mode: "source" } }
+            : { type: VIEW_TYPE, active: true, state: { file: file.path } };
+        try {
+            await leaf.setViewState(state);
+        } catch (e) {
+            // そのタブが壊れているときは、新しいタブで開き直す
+            try {
+                await this.app.workspace.getLeaf(true).setViewState(state);
+            } catch {
+                new Notice(`縦書き: 切り替えられません — ${String(e?.message ?? e)}`);
+            }
+        }
     }
 };

@@ -1,7 +1,7 @@
 {
   "id": "minogami",
   "name": "Minogami（美濃紙）",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.4.0",
   "description": "縦書きのまま編集できるプレーンテキスト専用のビュー。Markdown の装飾は描かず、組版と見た目に寄せる。",
   "author": "msonrm",
