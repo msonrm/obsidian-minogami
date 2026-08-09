@@ -36,6 +36,17 @@ const VIEW_TYPE = "minogami";
 const CARET_RETRY_MAX = 3;
 
 /**
+ * 縦組の再描画漏れを起こすエンジンか（＝ WebKit。iPad の WKWebView / Safari）。
+ *
+ * 対策（forceRepaint）は**縦組を丸ごと組み直す**ので、要らない側で毎回やると
+ * 打鍵ごとに全面レイアウトが 2 回増える。Chromebook は Electron ＝ Blink で
+ * この症状が出ないため、そちらでは何もしない。
+ * WKWebView の `navigator.vendor` は常に "Apple Computer, Inc."、
+ * Electron / Android WebView は "Google Inc." なので、ここで分かれる。
+ */
+const NEEDS_REPAINT_KICK = /apple/i.test(navigator.vendor ?? "");
+
+/**
  * 縦組での矢印キーの写像。**見た目の向き → セッションが期待する論理キー**。
  * 論理側は横書き前提（←→ = 文節移動 / ↑↓ = 候補送り）なので 90° 回す。
  *
@@ -469,9 +480,21 @@ class TategakiView extends TextFileView {
         this.setCaretByOffset(Math.min(this.lastCaretOffset, this.docText().length));
     }
 
-    /** Safari は縦書きの削除で再描画矩形を漏らす（削除済みの字が残像で見える）。
-     *  文字レイアウトを不可視の量だけ揺らして戻し、再描画を強制する */
+    /**
+     * Safari は縦組で**文字データを書き換えた**ときに再描画矩形を漏らす。
+     * 文字レイアウトを不可視の量だけ揺らして戻し、再描画を強制する。
+     *
+     * ★**漏れるのは `insertData` / `deleteData`（CharacterData の変異）のとき。**
+     * ノードを足し引きする構造変化なら正しく描かれる。だから症状は
+     *   - 削除 … 消したはずの字が残像で残る（移植時から既知）
+     *   - 挿入 … 打った字が**出てこない**（iPad 実機 2026-08-09）
+     * の 2 つの顔で出る。ラボの app.ts が挿入で困らなかったのは、あちらの
+     * `insertTextAtCaret` が `insertNode` + `normalize`（＝構造変化）だったから。
+     * こちらは 6 万字での組み直しを避けるために `insertData` へ替えてあり、
+     * **その最適化と一緒に、暗黙に効いていた再描画を落としていた。**
+     */
     forceRepaint() {
+        if (!NEEDS_REPAINT_KICK) return;
         this.editorEl.style.letterSpacing = "0.001px";
         requestAnimationFrame(() => {
             this.editorEl.style.letterSpacing = "";
@@ -769,6 +792,9 @@ class TategakiView extends TextFileView {
             after.collapse(true);
             this.selectRange(after);
             this.lastCaretOffset = this.caretOffset();
+            // ★Safari は `insertData` の再描画を漏らす（＝打った字が出てこない）。
+            // 構造を変えない書き換えなので、こちらから再描画を促す必要がある
+            this.forceRepaint();
             return;
         }
         const tn = document.createTextNode(text);
@@ -1180,6 +1206,8 @@ class TategakiView extends TextFileView {
         this.editorEl.normalize();
         this.setCaretByOffset(from + (text ? text.length : 0));
         this.syncFromDom();
+        // 再変換・確定アンドゥは**削除を伴う**（ラボも同じ場所で再描画を促している）
+        this.forceRepaint();
         this.scheduleCaret(true);
     }
 
