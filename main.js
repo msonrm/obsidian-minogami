@@ -36,16 +36,6 @@ const VIEW_TYPE = "minogami";
 const CARET_RETRY_MAX = 3;
 
 /**
- * 縦組の再描画漏れを起こすエンジンか（＝ WebKit。iPad の WKWebView / Safari）。
- *
- * 対策（forceRepaint）は打鍵ごとに全面の再描画を促すので、要らない側ではやらない。
- * Chromebook は Electron ＝ Blink でこの症状が出ない。
- * WKWebView の `navigator.vendor` は常に "Apple Computer, Inc."、
- * Electron / Android WebView は "Google Inc." なので、ここで分かれる。
- */
-const NEEDS_REPAINT_KICK = /apple/i.test(navigator.vendor ?? "");
-
-/**
  * 縦組での矢印キーの写像。**見た目の向き → セッションが期待する論理キー**。
  * 論理側は横書き前提（←→ = 文節移動 / ↑↓ = 候補送り）なので 90° 回す。
  *
@@ -479,39 +469,23 @@ class TategakiView extends TextFileView {
         this.setCaretByOffset(Math.min(this.lastCaretOffset, this.docText().length));
     }
 
-    /**
-     * Safari は縦組で**文字データを書き換えた**ときに再描画矩形を漏らす。
-     * 文字レイアウトを不可視の量だけ揺らして戻し、再描画を強制する。
-     *
-     * ★**漏れるのは `insertData` / `deleteData`（CharacterData の変異）のとき。**
-     * ノードを足し引きする構造変化なら正しく描かれる。だから症状は
-     *   - 削除 … 消したはずの字が残像で残る（移植時から既知）
-     *   - 挿入 … 打った字が**出てこない**（iPad 実機 2026-08-09）
-     * の 2 つの顔で出る。ラボの app.ts が挿入で困らなかったのは、あちらの
-     * `insertTextAtCaret` が `insertNode` + `normalize`（＝構造変化）だったから。
-     * こちらは 6 万字での組み直しを避けるために `insertData` へ替えてあり、
-     * **その最適化と一緒に、暗黙に効いていた再描画を落としていた。**
-     *
-     * ★★**揺らすのは「塗り」だけ。レイアウトを動かしてはいけない。**
-     * ラボから移した実装は `letter-spacing` を揺らしていた（＝縦組の全面組み直し）。
-     * それで字は出るようになったが、**打鍵のたびに表示が右端へ飛ぶ**ようになった
-     * （iPad 実機 2026-08-09）。WebKit は編集領域のレイアウトが動くと
-     * 「キャレットを見せる」スクロールを連れてきて、**縦組の始端＝右へ寄せる**。
-     * ← の押しっぱなしで起きるページングと同じ機構で、引き金だけが違う。
-     *
-     * 直すべきは塗りの漏れなので、**継承する塗り専用の性質**を揺らす。
-     * `text-shadow` は継承するので中の文字まで再描画の対象になり、レイアウトは
-     * 1 ミリも動かない ＝ reveal を呼ばない。オフセットもぼかしも 0 で、
-     * 字の真下に 1% の濃さで敷くだけなので見た目にも出ない。
-     * 副産物として、iPad の打鍵から全面レイアウトが 2 回消える。
-     */
-    forceRepaint() {
-        if (!NEEDS_REPAINT_KICK) return;
-        this.editorEl.style.textShadow = "0 0 0 rgba(0, 0, 0, 0.01)";
-        requestAnimationFrame(() => {
-            this.editorEl.style.textShadow = "";
-        });
-    }
+    // ★**再描画を「強制する」仕掛けは持たない。**
+    //
+    // Safari は縦組で**文字データだけを書き換える**（`insertData` / `deleteData` ＝
+    // CharacterData の変異）と再描画矩形を漏らす。症状は 2 つの顔で出た ——
+    // 挿入 = 打った字が出てこない / 削除 = 消した字が残像で残る。
+    //
+    // ラボから移した対策は editing host の style を一瞬揺らすものだったが、
+    // **iPad ではこれ自体が害になる**: WebKit は編集領域の style に触られると
+    // 「キャレットを見せる」スクロールを連れてきて、**縦組の始端＝右へ寄せる**。
+    // 打鍵のたびに表示が右端へ飛んだ（0.1.2 = letter-spacing / 0.1.3 = text-shadow。
+    // **レイアウトを動かすかどうかは関係なく、style を触ると出る**）。
+    // ← の押しっぱなしで起きるページングと同じ機構で、引き金だけが違う。
+    //
+    // そこで**漏れない書き方をする**ことにした。ノードが増減する構造変化なら
+    // Safari も正しく描くので、挿入は「独立したノードを挿す」、削除は
+    // 「消す範囲をノードへ切り出して取り除く」形にしてある（`insertTextAtCaret` /
+    // `deleteRange`）。★**壊れた層を下から叩くより、壊れない書き方に寄せる。**
 
     // ---- 自前キャレット --------------------------------------------------
 
@@ -785,7 +759,7 @@ class TategakiView extends TextFileView {
         this.ensureEofBr();
         this.setCaretByOffset(Math.min(s.caret, s.text.length));
         this.syncFromDom();
-        this.forceRepaint();
+        // 本文ごと置き換える（＝構造変化）ので、再描画はブラウザが自分で行う
         this.scheduleCaret(false);
         return true;
     }
@@ -793,24 +767,28 @@ class TategakiView extends TextFileView {
     insertTextAtCaret(text) {
         const r = this.caretRange();
         r.deleteContents();
-        // ★**ノードを分割しない。** 既存のテキストノードへ直接差し込む。
-        // insertNode + normalize は 6 万字のテキストノードを作り直し、縦組を
-        // 丸ごと組み直すので、1 打鍵に 1 秒近くかかっていた（実機 2026-08-09）
+        // ★**独立したテキストノードとして挿す（＝構造変化）。`insertData` は使わない。**
+        // Safari は文字データだけを書き換えると再描画を漏らす（打った字が出てこない）が、
+        // ノードが増減するときは正しく描く。**塗りを揺らして補うのは駄目**で、
+        // editing host の style に触ると WebKit が「キャレットを見せる」スクロールを
+        // 連れてきて、打鍵のたびに表示が右端へ飛ぶ（0.1.2 / 0.1.3 の実機で確認）。
+        //
+        // `normalize()` はしない —— 6 万字で重かったのは**毎打鍵で巨大なテキストノードを
+        // 作り直す**ことで、分割そのものは安い。ノードは削除・未確定の消去・再変換の
+        // ときに merge される。分割の仕方も、末尾／先頭なら**分割せず隣に挿す**ので、
+        // 続けて打っている間は 1 打鍵 = 1 ノードで済む（空ノードも作らない）
         const node = r.startContainer;
-        if (node.nodeType === 3) {
-            node.insertData(r.startOffset, text);
-            const after = document.createRange();
-            after.setStart(node, r.startOffset + text.length);
-            after.collapse(true);
-            this.selectRange(after);
-            this.lastCaretOffset = this.caretOffset();
-            // ★Safari は `insertData` の再描画を漏らす（＝打った字が出てこない）。
-            // 構造を変えない書き換えなので、こちらから再描画を促す必要がある
-            this.forceRepaint();
-            return;
-        }
         const tn = document.createTextNode(text);
-        r.insertNode(tn);
+        if (node.nodeType === 3) {
+            if (r.startOffset >= node.length) node.after(tn);
+            else if (r.startOffset === 0) node.before(tn);
+            else {
+                node.splitText(r.startOffset);
+                node.after(tn);
+            }
+        } else {
+            r.insertNode(tn);
+        }
         const after = document.createRange();
         after.setStart(tn, text.length);
         after.collapse(true);
@@ -818,10 +796,21 @@ class TategakiView extends TextFileView {
         this.lastCaretOffset = this.caretOffset();
     }
 
-    /** 範囲を消す。1 つのテキストノードに収まるなら**その場で削る**（組み直しを避ける） */
+    /**
+     * 範囲を消す。1 つのテキストノードに収まるときは、消す範囲を**自分のノードへ
+     * 切り出して取り除く**（＝構造変化）。`deleteData` で削るだけだと Safari が
+     * 再描画を漏らし、消したはずの字が残像で残る —— 挿入側と同じ 1 つのバグで、
+     * 直し方も同じ（**style は触らない**。触ると reveal のスクロールが付いてくる）。
+     */
     deleteRange(r, caretAt) {
         if (r.startContainer === r.endContainer && r.startContainer.nodeType === 3) {
-            r.startContainer.deleteData(r.startOffset, r.endOffset - r.startOffset);
+            const node = r.startContainer;
+            const mid = node.splitText(r.startOffset);         // [前][消す + 後]
+            const tail = mid.splitText(r.endOffset - r.startOffset); // [前][消す][後]
+            mid.remove();
+            // 空になったノードは残さない（歩き回るコードは通せるが、溜めても得が無い）
+            if (!node.length) node.remove();
+            if (!tail.length) tail.remove();
             this.setCaretByOffset(caretAt);
             return;
         }
@@ -834,9 +823,9 @@ class TategakiView extends TextFileView {
         const sel = window.getSelection();
         if (!sel || sel.rangeCount === 0) return;
         if (!sel.isCollapsed) {
-            sel.getRangeAt(0).deleteContents();
-            this.editorEl.normalize();
-            this.setCaretByOffset(this.caretOffset());
+            // 選択の削除も deleteRange に通す（1 ノードに収まるときの残像対策は同じ）
+            const r = sel.getRangeAt(0);
+            this.deleteRange(r, this.offsetOfPoint(r.startContainer, r.startOffset));
             return;
         }
         const off = this.caretOffset();
@@ -1213,13 +1202,12 @@ class TategakiView extends TextFileView {
         this.snapshotCoalesced(); // ホスト経由の変更もアンドゥに積む
         const r = this.rangeAt(from, to);
         if (!r) return;
-        r.deleteContents();
-        if (text) r.insertNode(document.createTextNode(text));
-        this.editorEl.normalize();
-        this.setCaretByOffset(from + (text ? text.length : 0));
+        // 消すのも挿すのも**構造を変える形**に通す。ここは再変換と確定アンドゥの経路で、
+        // 削除だけになることもある（＝残像が出やすい側）
+        if (from !== to) this.deleteRange(r, from);
+        else this.setCaretByOffset(from);
+        if (text) this.insertTextAtCaret(text);
         this.syncFromDom();
-        // 再変換・確定アンドゥは**削除を伴う**（ラボも同じ場所で再描画を促している）
-        this.forceRepaint();
         this.scheduleCaret(true);
     }
 
@@ -1525,7 +1513,6 @@ class TategakiView extends TextFileView {
             this.snapshotCoalesced();
             this.deleteAround(e.key === "Backspace");
             this.syncFromDom();
-            this.forceRepaint();
             this.scheduleCaret(true);
         }
     }
