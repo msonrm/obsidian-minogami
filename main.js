@@ -38,9 +38,8 @@ const CARET_RETRY_MAX = 3;
 /**
  * 縦組の再描画漏れを起こすエンジンか（＝ WebKit。iPad の WKWebView / Safari）。
  *
- * 対策（forceRepaint）は**縦組を丸ごと組み直す**ので、要らない側で毎回やると
- * 打鍵ごとに全面レイアウトが 2 回増える。Chromebook は Electron ＝ Blink で
- * この症状が出ないため、そちらでは何もしない。
+ * 対策（forceRepaint）は打鍵ごとに全面の再描画を促すので、要らない側ではやらない。
+ * Chromebook は Electron ＝ Blink でこの症状が出ない。
  * WKWebView の `navigator.vendor` は常に "Apple Computer, Inc."、
  * Electron / Android WebView は "Google Inc." なので、ここで分かれる。
  */
@@ -492,12 +491,25 @@ class TategakiView extends TextFileView {
      * `insertTextAtCaret` が `insertNode` + `normalize`（＝構造変化）だったから。
      * こちらは 6 万字での組み直しを避けるために `insertData` へ替えてあり、
      * **その最適化と一緒に、暗黙に効いていた再描画を落としていた。**
+     *
+     * ★★**揺らすのは「塗り」だけ。レイアウトを動かしてはいけない。**
+     * ラボから移した実装は `letter-spacing` を揺らしていた（＝縦組の全面組み直し）。
+     * それで字は出るようになったが、**打鍵のたびに表示が右端へ飛ぶ**ようになった
+     * （iPad 実機 2026-08-09）。WebKit は編集領域のレイアウトが動くと
+     * 「キャレットを見せる」スクロールを連れてきて、**縦組の始端＝右へ寄せる**。
+     * ← の押しっぱなしで起きるページングと同じ機構で、引き金だけが違う。
+     *
+     * 直すべきは塗りの漏れなので、**継承する塗り専用の性質**を揺らす。
+     * `text-shadow` は継承するので中の文字まで再描画の対象になり、レイアウトは
+     * 1 ミリも動かない ＝ reveal を呼ばない。オフセットもぼかしも 0 で、
+     * 字の真下に 1% の濃さで敷くだけなので見た目にも出ない。
+     * 副産物として、iPad の打鍵から全面レイアウトが 2 回消える。
      */
     forceRepaint() {
         if (!NEEDS_REPAINT_KICK) return;
-        this.editorEl.style.letterSpacing = "0.001px";
+        this.editorEl.style.textShadow = "0 0 0 rgba(0, 0, 0, 0.01)";
         requestAnimationFrame(() => {
-            this.editorEl.style.letterSpacing = "";
+            this.editorEl.style.textShadow = "";
         });
     }
 
