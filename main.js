@@ -36,8 +36,9 @@ const VIEW_TYPE = "minogami";
 const CARET_RETRY_MAX = 3;
 
 /** ブラウザの reveal を押し返す時間（ms）。編集・移動のたびに張り直す。
- *  キーリピートは毎秒 30 回なので、1 打鍵ぶんより長ければ切れ目なく効く */
-const SCROLL_HOLD_MS = 250;
+ *  キーリピートは毎秒 30 回なので、1 打鍵ぶんより長ければ切れ目なく効く。
+ *  iOS は編集の後始末が遅れて来ることがあるので少し長めに取る（0.1.6 で 250 → 400） */
+const SCROLL_HOLD_MS = 400;
 
 /**
  * 縦組の再描画漏れを起こすエンジンか（＝ WebKit。iPad の WKWebView / Safari）。
@@ -160,6 +161,7 @@ class TategakiView extends TextFileView {
         this.scrollHoldX = null;   // 横スクロールの「こちらが決めた位置」（押し通す間だけ非 null）
         this.scrollHoldUntil = 0;
         this.scrollHoldRaf = 0;
+        this.editHoldClamp = false; // 1 打鍵ぶんの編集中（動いてよい量に上限を掛ける）
         this.lastCaretOffset = 0;
         this.goalOffsetY = null; // 行移動で保つ「行に沿った目標位置」（枠の上端からの距離）
         this.caretSide = "upstream"; // 折り返し境界でキャレットをどちらの行に描くか
@@ -337,6 +339,15 @@ class TategakiView extends TextFileView {
         // **区別できるのは「触ったかどうか」だけ**
         for (const ev of ["pointerdown", "touchstart", "wheel"]) {
             this.registerDomEvent(this.editorEl, ev, () => this.releaseScrollHold());
+        }
+
+        // ★reveal は **`overflow: hidden` の祖先まで動かす**（スクロールバーが無いので
+        // 気づけないが、中身は横にずれる）。ここは常に 0 が正しいので、動いたら即戻す
+        for (const el of [this.wrapEl, this.contentEl]) {
+            this.registerDomEvent(el, "scroll", () => {
+                if (el.scrollLeft !== 0) el.scrollLeft = 0;
+                if (el.scrollTop !== 0) el.scrollTop = 0;
+            });
         }
 
         // スクロール中にプローブ（DOM 変異 + 選択の張り直し）を走らせると、Safari の
@@ -699,6 +710,16 @@ class TategakiView extends TextFileView {
             // 狙いの画面位置が指定されていればそれを優先。無ければ「枠の外なら戻す」
             const moved = this.pinFrames > 0 ? this.enforcePin(rect) : this.scrollToRect(rect);
             if (moved) rect = this.measureCaretRect() ?? rect;
+            // ★**1 打鍵で動いてよい量には上限がある。** 1 文字の編集でキャレットが動くのは
+            // 高々 1 列ぶん。それ以上動いたなら、測った矩形か reveal のどちらかが嘘なので、
+            // **編集前の位置に戻す**（`armEditScroll` が編集前に押さえてある）
+            if (this.editHoldClamp && this.scrollHoldX !== null) {
+                if (Math.abs(this.editorEl.scrollLeft - this.scrollHoldX) > this.columnStep() * 3) {
+                    this.editorEl.scrollLeft = this.scrollHoldX;
+                    rect = this.measureCaretRect() ?? rect;
+                }
+                this.editHoldClamp = false;
+            }
             // ★ここで決まった位置が**こちらの答え**。あとから来る reveal に上書きさせない
             this.holdScroll();
         }
@@ -798,6 +819,25 @@ class TategakiView extends TextFileView {
     releaseScrollHold() {
         this.scrollHoldX = null;
         this.scrollHoldUntil = 0;
+        this.editHoldClamp = false;
+    }
+
+    /**
+     * ★**編集の「前に」いまのスクロール位置を正解として押さえる。**
+     *
+     * 0.1.5 では編集の**後**（updateCaret の中）で押さえていて、打鍵の飛びには効かなかった。
+     * 理由は測定そのものにある —— `getBoundingClientRect` はレイアウトを同期で流し、
+     * WebKit は**そのレイアウトの後始末で reveal を実行する**。つまり
+     * 「測る → 位置を覚える」の順だと、**覚える時点で既に飛んでいる**。
+     *
+     * ← が 0.1.5 で直ったのに打鍵が直らなかったのは、行移動には
+     * 「キャレットを画面のどこへ置きたいか」（`pinCaretX`）が独立にあるから。
+     * 飛ばされても計算し直せる。打鍵にはそれが無く、現在位置を信じるしかなかった。
+     * **編集の前に押さえておけば、打鍵にも同じ「独立した正解」ができる。**
+     */
+    armEditScroll() {
+        this.holdScroll();
+        this.editHoldClamp = true;
     }
 
     scrollToRect(rect) {
@@ -1280,6 +1320,7 @@ class TategakiView extends TextFileView {
     }
 
     replaceOffsets(from, to, text) {
+        this.armEditScroll();     // 再変換・確定アンドゥも編集（打鍵と同じ手当て）
         this.snapshotCoalesced(); // ホスト経由の変更もアンドゥに積む
         const r = this.rangeAt(from, to);
         if (!r) return;
@@ -1294,6 +1335,7 @@ class TategakiView extends TextFileView {
     }
 
     replaceSelectionText(text) {
+        this.armEditScroll();     // 確定も編集（打鍵と同じ手当て）
         this.snapshotCoalesced(); // ホスト経由の変更もアンドゥに積む
         // 未確定表示があるときは**その直前**に入れる（確定はその位置で起きる）。
         // 直後に hide() が来て未確定が消え、キャレットは入れた文字の後ろに残る
@@ -1591,6 +1633,7 @@ class TategakiView extends TextFileView {
             (e.key === "Backspace" || e.key === "Delete")) {
             e.preventDefault();
             this.ensureSelection();
+            this.armEditScroll(); // ★編集の**前**に、いまの位置を正解として押さえる
             // 連続削除は 1 段にまとめる（押しっぱなしで文書のコピーが積み上がるのを防ぐ）
             this.snapshotCoalesced();
             this.deleteAround(e.key === "Backspace");
@@ -1605,6 +1648,7 @@ class TategakiView extends TextFileView {
         // （offset 系がテキストノードだけを歩く前提を守るため）
         if (e.inputType === "insertParagraph" || e.inputType === "insertLineBreak") {
             e.preventDefault();
+            this.armEditScroll(); // ★編集の**前**に押さえる（下の insertText と同じ理由）
             this.snapshot();
             this.insertTextAtCaret("\n");
             this.syncFromDom();
@@ -1621,6 +1665,7 @@ class TategakiView extends TextFileView {
         // 未確定の面倒はブラウザに見てもらう必要がある（hechima を繋いだら不要になる）
         if (e.inputType === "insertText" && typeof e.data === "string" && !e.isComposing) {
             e.preventDefault();
+            this.armEditScroll(); // ★編集の**前**に押さえる（測ると reveal が走ってしまう）
             this.snapshotCoalesced();
             this.insertTextAtCaret(e.data);
             this.syncFromDom();
@@ -1636,6 +1681,8 @@ class TategakiView extends TextFileView {
         e.preventDefault();
         const text = e.clipboardData?.getData("text/plain") ?? "";
         if (!text) return;
+        // 貼り付けは**上限を掛けない**（キャレットが遠くへ動くのが正しいことがある）
+        this.holdScroll();
         this.snapshot();
         this.insertTextAtCaret(text);
         this.syncFromDom();
