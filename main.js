@@ -1293,6 +1293,13 @@ class TategakiView extends TextFileView {
     buildHost() {
         const v = this;
         return {
+            // 編集要素を名乗る。hechima がフリックキーボードを出している間、ここに
+            // `inputmode="none"` を付けて **OS のソフトウェアキーボードを抑止する**
+            // （名乗らないと、縦書きビューでだけ OS のキーボードが出る。iPad で実機報告）。
+            // getter にしてあるのは、ホストを組み立てる時点で要素がまだ無い場合のため
+            get contentEl() {
+                return v.editorEl;
+            },
             editor: {
                 getCursor: () => v.offsetToPos(v.caretOffset()),
                 setCursor: (pos) => v.setCaretByOffset(v.posToOffset(pos)),
