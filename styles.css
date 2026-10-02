@@ -133,6 +133,12 @@
     border-right: 1px solid var(--text-faint);
 }
 
+/* 続きを待っている打鍵の仮表示（ローマ字の k、行段系の子音を行の代表で見せた「な」など）。
+   hechima 本体（.hechima-pending）と同じ濃さ */
+.tategaki-pending {
+    opacity: .45;
+}
+
 /* 候補窓。**段組は「横 flex の各段に writing-mode」**方式で、
    コンテナ自体は横書きのままにする（直交フローの自動サイズ計算を避ける） */
 .tategaki-cands {

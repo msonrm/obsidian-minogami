@@ -1414,7 +1414,19 @@ class TategakiView extends TextFileView {
         for (const seg of segments) {
             const el = document.createElement("span");
             el.className = `tategaki-seg-${seg.kind}`;
-            el.textContent = seg.text;
+            // よみ末尾の「まだ続きを待っている」分（hechima 0.24.0+ の pending。コードポイント数）
+            // だけ薄くする。入れ子の span なので「文節 1 つ = span 1 つ」は崩れない
+            const chars = [...seg.text];
+            const pend = seg.kind === "yomi" ? Math.min(seg.pending || 0, chars.length) : 0;
+            if (pend > 0) {
+                el.textContent = chars.slice(0, chars.length - pend).join("");
+                const tail = document.createElement("span");
+                tail.className = "tategaki-pending";
+                tail.textContent = chars.slice(chars.length - pend).join("");
+                el.appendChild(tail);
+            } else {
+                el.textContent = seg.text;
+            }
             this.compEl.appendChild(el);
         }
         this.renderCandidates(segments);
